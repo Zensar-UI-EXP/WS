@@ -1,0 +1,15 @@
+A clearer view of your portfolio
+
+Your 7 matching holdings have a combined value of £1,284,500, with an unrealised gain of £93,050 (7.81%) versus recorded cost.
+
+- Equities is the largest allocation at £642,250, representing 50.0% of this selection.
+- Values are denominated in GBP and reflect the snapshot dated 2026-10-19. Gains are against recorded cost, not an annualised return.
+
+ALLOCATION (GBP)
+Equities: £642,250
+Fixed income: £385,350
+Real assets: £128,450
+Cash: £128,450
+
+Data: demo; engine: demo; snapshot: 2026-10-19
+Illustrative POC. Not investment advice.
