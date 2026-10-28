@@ -58,6 +58,12 @@ export type Portfolio = {
   filter: PortfolioFilter;
 };
 export type Report = Narrative & {
+  output?: {
+    mimeType: "text/plain" | "text/html" | "image/png" | "application/pdf";
+    encoding: "utf8" | "base64";
+    content: string;
+    filename: string;
+  };
   id: string;
   question: string;
   format: Format;
