@@ -4,7 +4,7 @@ import { requestSchema } from "@/lib/contracts";
 import OpenAI from "openai";
 
 export const runtime = "nodejs";
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(request: Request) {
   const origin = request.headers.get("origin");
@@ -55,9 +55,24 @@ export async function POST(request: Request) {
         },
         { status: 400 },
       );
-    return NextResponse.json(
-      await createReport(input.data.question, input.data.format),
-    );
+    const report = await createReport(input.data.question, input.data.format);
+    if (!report.output) throw new Error("No agent output was returned.");
+    if (request.headers.get("accept")?.includes("application/json")) {
+      return NextResponse.json(report, { headers: { "Cache-Control": "no-store" } });
+    }
+    const output = report.output;
+    const bodyBytes = output.encoding === "base64"
+      ? Buffer.from(output.content, "base64")
+      : Buffer.from(output.content, "utf8");
+    return new Response(bodyBytes, {
+      headers: {
+        "Content-Type": output.mimeType + (output.encoding === "utf8" ? "; charset=utf-8" : ""),
+        "Content-Disposition": `${output.mimeType === "text/html" ? "attachment" : "inline"}; filename="${output.filename}"`,
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:;",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
   } catch (error) {
     console.log(
       "Assistant request failed:test", error,

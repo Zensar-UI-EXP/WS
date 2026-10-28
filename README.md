@@ -1,6 +1,6 @@
 # Folio: LLM + MongoDB Reporting POC
 
-A working Next.js 16 / React 19 application that turns portfolio questions into text, interactive charts, PNG images, HTML documents and PDF reports. OpenAI is the default LLM provider. The included investment portfolio is illustrative, not financial advice.
+A working Next.js 16 / React 19 application that turns portfolio questions into agent-authored text, chart images, PNG images, HTML documents and PDF reports. OpenAI is the default LLM provider. The included investment portfolio is illustrative, not financial advice.
 
 ## Run Locally
 
@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:3000. Without environment variables, the app runs in an explicitly labeled demo mode using seven sample holdings and deterministic templates. Demo mode does not call an LLM or MongoDB. Saved reports and recent explorations last for the current browser session in memory; refreshing clears them.
+Open http://127.0.0.1:3000. Without environment variables, the app shows an explicitly labeled sample portfolio overview. Generate requires an OpenAI API key and saved agent ID; it never substitutes formatting templates for agent output. Saved reports and recent explorations last for the current browser session in memory; refreshing clears them.
 
 ## Connect OpenAI and MongoDB
 
@@ -39,9 +39,9 @@ API usage may incur charges. Never enter API keys in the chat UI.
 
 | OpenAI key + agent ID | MongoDB URI | Behaviour                                   |
 | --------------------- | ----------- | ------------------------------------------- |
-| Missing               | Missing     | Sample data + deterministic templates       |
+| Missing               | Missing     | Sample overview; generation requires OpenAI       |
 | Valid                 | Missing     | Saved agent tool calls over sample data     |
-| Missing               | Set         | Database data + deterministic templates     |
+| Missing               | Set         | Database overview; generation requires OpenAI     |
 | Valid                 | Set         | Full frontend → saved agent → MongoDB → report flow |
 
 Configured service failures return an error; they never silently substitute demo data. The initial screen contains an explicitly labeled sample snapshot, replaced after the connection check if MongoDB is configured. The snapshot itself is template-generated; click Generate to call the LLM. An empty collection returns an empty report, not seeded data.
@@ -61,17 +61,17 @@ sequenceDiagram
     API->>DB: Read holdings with bounded filters
     DB-->>API: Portfolio snapshot
     API-->>Agent: Holdings + calculated totals
-    Agent-->>API: Structured narrative + chart grouping
-    API-->>UI: Report + source data + provenance
-    UI->>UI: Render / export chart, text, PNG, HTML or PDF
+    Agent-->>API: Finished text/HTML or hosted PNG/PDF artifact
+    API-->>UI: Final output + metadata when JSON is requested
+    UI->>UI: Display final output; download original file
 ```
 
 - `app/api/assistant/route.ts`: validates requests and invokes the reporting service.
-- `lib/assistant.ts`: saved Agents API session, server-side portfolio tool handler and structured report validation.
+- `lib/assistant.ts`: saved Agents API session, server-side portfolio tool handler and finished output retrieval and file signature validation.
 - `lib/portfolio.ts`: MongoDB connection reuse, allowlisted filters, document validation and totals.
 - `lib/contracts.ts`: shared request, tool and report contracts.
 - `components/workspace.tsx`: interactive charts, views, source status and session history.
-- `lib/exports.ts`: escaped HTML, canvas PNGs, plain text and jsPDF documents.
+- `lib/exports.ts`: shared overview chart palette.
 
 The LLM cannot execute arbitrary database queries, JavaScript or HTML. It can only request `get_portfolio` with an optional asset class and region. Charts use server-calculated values from the returned holdings; they do not use model-invented numbers. Natural-language observations are still model output and should be reviewed.
 
@@ -96,10 +96,18 @@ npm run build
 npm audit --audit-level=moderate
 ```
 
-Tests cover aggregate totals, filter validation, empty selections, request validation, same-origin protection, HTML escaping, PDF signatures and a mocked saved-agent tool-calling flow. Real OpenAI and MongoDB integration requires your credentials and is not exercised by the offline tests.
+Tests cover aggregate totals, filter validation, empty selections, request validation, same-origin protection, final text/HTML preservation, PNG/PDF signatures and a mocked saved-agent tool-calling flow. Real OpenAI and MongoDB integration requires your credentials and is not exercised by the offline tests.
 
 ## Before Deployment
 
 This is a localhost POC, not a production banking application. Add authentication, per-user/tenant query scoping, authorization, rate limiting, request size enforcement at the proxy, usage budgets, timeouts/cancellation, audit logs and operational monitoring. Current reads target a single shared portfolio, and any reachable API caller can read it. Origin checks are not authentication.
 
-Database results are sent to OpenAI when a key is configured. Obtain approval before using customer or other sensitive data and review your provider's retention, region and processing policies. Use least-privilege database users and a secret manager. HTML uses escaped templates, a restrictive CSP and a sandboxed preview. The LLM is not allowed to emit executable code.
+Database results are sent to OpenAI when a key is configured. Obtain approval before using customer or other sensitive data and review your provider's retention, region and processing policies. Use least-privilege database users and a secret manager. Agent-authored HTML uses a restrictive CSP and sandboxed preview. Chart, image and PDF generation execute inside an OpenAI-hosted sandbox with network access disabled.
+
+## Agent-generated output
+
+Every Generate request passes both `question` and `format` to the saved agent. The agent must retrieve the portfolio using `get_portfolio`. Text and HTML are its complete final answer; chart/image/PDF requests enable an OpenAI-hosted environment and require a real file under `/workspace/outputs`. Hosted sandbox access is required for these file formats and can incur container charges. Generation has a 300-second server duration allowance; deployment timeouts must support it.
+
+By default, `POST /api/assistant` returns the final content with `text/plain`, `text/html`, `image/png` (chart/image), or `application/pdf`. HTML is served as an attachment. Errors remain JSON with a non-success status. Set `Accept: application/json` to receive report metadata plus `output: { mimeType, encoding, content, filename }`; binary content uses base64. The frontend uses this envelope for history and holdings, and displays the original content without report-formatting functions. Downloading the current format reuses the original output; selecting a different export format asks the agent to generate it again.
+
+The initial overview remains a local sample/data snapshot, not a generated report. The former `reportText`, `reportHtml`, `reportImage`, and `reportPdf` formatters have been removed.

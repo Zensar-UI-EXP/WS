@@ -48,13 +48,7 @@ import {
   type Report,
 } from "@/lib/contracts";
 import { demoReport } from "@/lib/demo";
-import {
-  downloadReport,
-  palette,
-  reportHtml,
-  reportImage,
-  reportPdf,
-} from "@/lib/exports";
+import { palette } from "@/lib/exports";
 
 const outputFormats = [
   { id: "chart", label: "Chart", Icon: BarChart3 },
@@ -83,106 +77,37 @@ const suggestions = [
 type Status = { llm: "openai" | "demo"; database: "mongodb" | "demo" };
 type Modal = "connections" | "architecture" | null;
 
+function outputBlob(output: NonNullable<Report["output"]>) {
+  const content = output.encoding === "base64"
+    ? Uint8Array.from(atob(output.content), (character) => character.charCodeAt(0))
+    : output.content;
+  return new Blob([content], { type: output.mimeType });
+}
+
 function ReportPreview({ report }: { report: Report }) {
-  const [image, setImage] = useState("");
-  const [pdfUrl, setPdfUrl] = useState("");
-  const [error, setError] = useState("");
+  const output = report.output;
+  const [url, setUrl] = useState("");
   useEffect(() => {
-    let active = true;
-    let url = "";
-    setError("");
-    setImage("");
-    setPdfUrl("");
-    if (report.format === "image") {
-      try {
-        setImage(reportImage(report));
-      } catch {
-        setError("Image preview is unavailable. Try another format.");
-      }
-    }
-    if (report.format === "pdf") {
-      reportPdf(report)
-        .then((blob) => {
-          if (active) {
-            url = URL.createObjectURL(blob);
-            setPdfUrl(url);
-          }
-        })
-        .catch(() => {
-          if (active)
-            setError("PDF preview is unavailable. Try another format.");
-        });
-    }
-    return () => {
-      active = false;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [report]);
-  if (error)
-    return (
-      <p role="alert" className="error-message">
-        {error}
-      </p>
-    );
-  if (report.format === "html")
-    return (
-      <iframe
-        title="HTML report preview"
-        className="document-preview"
-        sandbox=""
-        srcDoc={reportHtml(report)}
-      />
-    );
-  if (report.format === "pdf")
-    return pdfUrl ? (
-      <>
-        <iframe
-          title="PDF report preview"
-          className="document-preview"
-          src={pdfUrl}
-        />
-        <p className="preview-note">
-          PDF not visible in your browser? Use the Download button above.
-        </p>
-      </>
-    ) : (
-      <div className="preview-loading">
-        <LoaderCircle className="spin" /> Preparing PDF
-      </div>
-    );
-  if (report.format === "image")
-    return image ? (
-      <img
-        className="image-preview"
-        src={image}
-        alt={`Portfolio allocation: ${report.title}`}
-      />
-    ) : (
-      <div className="preview-loading">
-        <LoaderCircle className="spin" /> Preparing image
-      </div>
-    );
-  return (
-    <article className="text-report">
-      <div className="eyebrow">PORTFOLIO BRIEF</div>
-      <h3>{report.title}</h3>
-      <p>{report.summary}</p>
-      <h4>Key observations</h4>
-      {report.insights.map((insight, index) => (
-        <p key={index} className="text-insight">
-          <span>0{index + 1}</span>
-          {insight}
-        </p>
-      ))}
-      <h4>Allocation</h4>
-      {chartData(report.portfolio, report.grouping).map((item) => (
-        <div className="text-allocation" key={item.name}>
-          <span>{item.name}</span>
-          <strong>{money(item.value)}</strong>
-        </div>
-      ))}
-    </article>
-  );
+    setUrl("");
+    if (!output || output.encoding !== "base64") return;
+    const nextUrl = URL.createObjectURL(outputBlob(output));
+    setUrl(nextUrl);
+    return () => URL.revokeObjectURL(nextUrl);
+  }, [output]);
+  if (!output) return <p className="preview-note">Generate a report to see the agent’s output.</p>;
+  if (output.mimeType === "text/plain") {
+    return <article className="text-report" style={{ whiteSpace: "pre-wrap" }}>{output.content}</article>;
+  }
+  if (output.mimeType === "text/html") {
+    return <iframe title="HTML report preview" className="document-preview" sandbox="" srcDoc={
+      `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">${output.content}`
+    } />;
+  }
+  if (!url) return <div className="preview-loading"><LoaderCircle className="spin" /> Loading report</div>;
+  if (output.mimeType === "image/png") {
+    return <img className="image-preview" src={url} alt={report.title} />;
+  }
+  return <iframe title="PDF report preview" className="document-preview" src={url} />;
 }
 
 export default function Workspace({ initial }: { initial: Report }) {
@@ -257,7 +182,7 @@ export default function Workspace({ initial }: { initial: Report }) {
     try {
       const response = await fetch("/api/assistant", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ question: prompt, format }),
       });
       const result = await response.json();
@@ -285,7 +210,28 @@ export default function Workspace({ initial }: { initial: Report }) {
     setExporting(true);
     setError("");
     try {
-      await downloadReport(report, target);
+      const requestedFormat: Format = target === "png" ? "image" : target === "txt" ? "text" : target;
+      const matches = report.output && (
+        report.format === requestedFormat || (report.format === "chart" && target === "png")
+      );
+      let output = matches ? report.output : undefined;
+      if (!output) {
+        const response = await fetch("/api/assistant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ question: report.question, format: requestedFormat }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Export generation failed.");
+        output = (result as Report).output;
+      }
+      if (!output) throw new Error("The agent did not return an output.");
+      const url = URL.createObjectURL(outputBlob(output));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = output.filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch {
       setError(
         "The export could not be created. Please try a different format.",
@@ -938,6 +884,8 @@ export default function Workspace({ initial }: { initial: Report }) {
                           </p>
                         )}
                       </div>
+                    ) : tab === "insights" && report.output ? (
+                      <ReportPreview report={report} />
                     ) : tab === "insights" ? (
                       <article className="insights-view">
                         <div className="eyebrow">THE BIGGER PICTURE</div>
@@ -950,7 +898,7 @@ export default function Workspace({ initial }: { initial: Report }) {
                           </div>
                         ))}
                       </article>
-                    ) : report.format !== "chart" ? (
+                    ) : report.output || report.format !== "chart" ? (
                       <ReportPreview report={report} />
                     ) : (
                       <div className="visual-report">
@@ -1246,7 +1194,7 @@ export default function Workspace({ initial }: { initial: Report }) {
                 <small>
                   {status?.llm === "openai"
                     ? "API key configured · verified on generation"
-                    : "No API key · deterministic demo responses"}
+                    : "No API key · generation unavailable"}
                 </small>
               </div>
               <span className="connection-badge">
@@ -1317,7 +1265,7 @@ export default function Workspace({ initial }: { initial: Report }) {
                 },
                 {
                   step: "04",
-                  title: "Structured report",
+                  title: "Agent-generated output",
                   detail: "Text, chart, PNG, HTML or PDF",
                 },
               ].map((item) => (
@@ -1332,9 +1280,9 @@ export default function Workspace({ initial }: { initial: Report }) {
               ))}
             </div>
             <p className="dialog-note">
-              Charts are calculated from database values. HTML is escaped and
-              sandboxed. Without credentials, demo mode uses sample data and
-              templates, not an LLM. This local POC has no authentication or
+              The agent creates reports from portfolio values. HTML previews are
+              sandboxed. File generation uses a hosted sandbox. Without OpenAI
+              credentials, only the portfolio overview is available. This local POC has no authentication or
               rate limiting; add both before deployment.
             </p>
           </>

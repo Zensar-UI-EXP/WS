@@ -6,7 +6,6 @@ import { summarize } from "../lib/portfolio";
 import { sampleHoldings } from "../lib/sample-data";
 import { POST } from "../app/api/assistant/route";
 import { createReport } from "../lib/assistant";
-import { reportHtml, reportPdf, reportText } from "../lib/exports";
 
 const noFilter = { assetClass: null, region: null };
 test("portfolio and chart totals reconcile with recorded holdings", () => {
@@ -134,23 +133,7 @@ test("origin validation accepts the request host when the forwarded host is inte
   assert.equal((await POST(request)).status, 400);
 });
 
-test("HTML exports escape model text and PDF exports contain a real PDF document", async () => {
-  const report = demoReport(
-    "Portfolio",
-    "html",
-    summarize(sampleHoldings, noFilter, "demo"),
-  );
-  report.title = '<script>alert("test")</script>';
-  const html = reportHtml(report);
-  assert.ok(!html.includes("<script>"));
-  assert.ok(html.includes("&lt;script&gt;"));
-  assert.ok(html.includes("Content-Security-Policy"));
-  assert.ok(reportText(report).includes("£1,284,500"));
-  const pdf = await reportPdf(report);
-  assert.equal((await pdf.text()).slice(0, 5), "%PDF-");
-});
-
-test("saved agent uses the portfolio tool before producing a structured report", async () => {
+test("saved agent produces final outputs, retrieves artifacts and preserves response bodies", async () => {
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.OPENAI_API_KEY;
   const originalAgentId = process.env.OPENAI_AGENT_ID;
@@ -159,13 +142,11 @@ test("saved agent uses the portfolio tool before producing a structured report",
   process.env.OPENAI_API_KEY = "test-key-not-a-real-secret";
   process.env.OPENAI_AGENT_ID = "agent_test";
   delete process.env.MONGODB_URI;
-  const narrative = {
-    title: "UK bonds",
-    summary: "One matching holding worth £154,140.",
-    insights: ["Values are in GBP."],
-    grouping: "holding",
-    chartType: "bar",
-  };
+  let requestedFormat = "text";
+  let missingArtifact = false;
+  let invalidArtifact = false;
+  const finalText = "UK bonds\nOne matching holding worth £154,140.";
+  const finalHtml = "<!doctype html><html><body><h1>UK bonds</h1></body></html>";
   const turn = {
     id: "turn_test",
     agent_id: "agent_test",
@@ -199,7 +180,7 @@ test("saved agent uses the portfolio tool before producing a structured report",
   };
   const assistantMessage = {
     id: "message_test",
-    content: [{ type: "output_text", text: JSON.stringify(narrative) }],
+    content: [{ type: "output_text", text: finalText }],
     phase: "final_answer",
     role: "assistant",
     status: "completed",
@@ -251,6 +232,10 @@ test("saved agent uses the portfolio tool before producing a structured report",
   ];
   globalThis.fetch = async (input, init) => {
     const url = String(input);
+    if (url.includes("/artifacts")) {
+      if (url.endsWith("/content")) return new Response(invalidArtifact ? "invalid file" : requestedFormat === "pdf" ? "%PDF-1.7\nagent file" : new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0]));
+      return Response.json({ object: "list", data: missingArtifact ? [] : [{ id: "artifact_test", path: `/workspace/outputs/report.${requestedFormat === "pdf" ? "pdf" : "png"}`, turn_id: "turn_test", size_bytes: 30 }], has_more: false });
+    }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     requests.push({ url, body });
     if (
@@ -259,6 +244,7 @@ test("saved agent uses the portfolio tool before producing a structured report",
     )
       return new Response(
         events
+          .map((event) => event.type === "agent.session.turn.item.done" ? { ...event, item: { ...assistantMessage, content: [{ type: "output_text", text: requestedFormat === "html" ? finalHtml : finalText }] } } : event)
           .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
           .join(""),
         { headers: { "content-type": "text/event-stream" } },
@@ -268,12 +254,43 @@ test("saved agent uses the portfolio tool before producing a structured report",
     throw new Error(`Unexpected OpenAI request: ${url}`);
   };
   try {
-    const report = await createReport("Compare UK bonds", "pdf");
+    const report = await createReport("Compare UK bonds", "text");
     assert.equal(report.engine, "openai");
-    assert.equal(report.format, "pdf");
+    assert.equal(report.format, "text");
     assert.equal(report.portfolio.total, 154140);
     assert.equal(report.portfolio.holdings.length, 1);
-    assert.equal(report.title, "UK bonds");
+    assert.equal(report.output?.content, finalText);
+    assert.equal(report.output?.mimeType, "text/plain");
+    for (const format of ["text", "html", "chart", "image", "pdf"] as const) {
+      requestedFormat = format;
+      const response = await POST(new Request("http://localhost:3000/api/assistant", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ question: "Compare UK bonds", format }),
+      }));
+      assert.equal(response.status, 200);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (format === "text") assert.equal(bytes.toString(), finalText);
+      else if (format === "html") assert.equal(bytes.toString(), finalHtml);
+      else if (format === "pdf") assert.equal(bytes.subarray(0, 5).toString(), "%PDF-");
+      else assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+      const mime = format === "text" ? "text/plain" : format === "html" ? "text/html" : format === "pdf" ? "application/pdf" : "image/png";
+      assert.ok(response.headers.get("content-type")?.startsWith(mime));
+      const latest = requests.filter(({ url }) => url.endsWith("/agents/sessions")).at(-1)!;
+      assert.equal((latest.body.environment as { type: string }).type, ["chart", "image", "pdf"].includes(format) ? "openai_hosted" : "none");
+      assert.equal(JSON.parse(latest.body.input as string).format, format);
+    }
+    requestedFormat = "text";
+    const jsonResponse = await POST(new Request("http://localhost:3000/api/assistant", {
+      method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ question: "Compare UK bonds", format: "text" }),
+    }));
+    assert.equal((await jsonResponse.json()).output.content, finalText);
+    requestedFormat = "pdf";
+    missingArtifact = true;
+    await assert.rejects(createReport("Compare UK bonds", "pdf"), /did not create/);
+    missingArtifact = false;
+    invalidArtifact = true;
+    await assert.rejects(createReport("Compare UK bonds", "pdf"), /invalid output file/);
     const sessionRequest = requests.find(({ url }) =>
       url.endsWith("/agents/sessions"),
     );
