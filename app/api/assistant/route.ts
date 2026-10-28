@@ -8,9 +8,24 @@ export const maxDuration = 120;
 
 export async function POST(request: Request) {
   const origin = request.headers.get("origin");
-  const requestUrl = new URL(request.url);
-  const expectedOrigin = `${requestUrl.protocol}//${request.headers.get("host") || requestUrl.host}`;
-  if (origin && origin !== expectedOrigin)
+  const expectedHosts = [
+    request.headers.get("x-forwarded-host"),
+    request.headers.get("host"),
+  ]
+    .flatMap((host) => host?.split(",") ?? [])
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  let sameOrigin = false;
+  try {
+    const requestOrigin = origin ? new URL(origin) : null;
+    sameOrigin =
+      !!requestOrigin &&
+      ["http:", "https:"].includes(requestOrigin.protocol) &&
+      expectedHosts.includes(requestOrigin.host.toLowerCase());
+  } catch {
+    sameOrigin = false;
+  }
+  if (origin && !sameOrigin)
     return NextResponse.json(
       { error: "Cross-origin requests are not allowed." },
       { status: 403 },
