@@ -15,16 +15,18 @@ Open http://127.0.0.1:3000. Without environment variables, the app runs in an ex
 
 ## Connect OpenAI and MongoDB
 
-Create `.env.local` using the keys listed in `.env.example`:
+Create and save an agent in the same OpenAI Platform project as your API key. Copy the `agent_...` ID from its URL. The app supplies its `get_portfolio` function for each session, so the agent's model and base instructions stay configured in the platform.
+
+Create an application API key in that project with `api.agents.read`, `api.agents.write` and `api.responses.write` permissions. Then create `.env.local` using the keys listed in `.env.example`:
 
 ```dotenv
-OPENAI_API_KEY=your-key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_API_KEY=your-project-api-key
+OPENAI_AGENT_ID=agent_...
 MONGODB_URI=mongodb://127.0.0.1:27017
 MONGODB_DB=folio_poc
 ```
 
-Use a local MongoDB instance or an Atlas connection string. For Atlas, allow your server IP and configure a database user. Do not use a `NEXT_PUBLIC_` prefix for credentials.
+The agent ID is not an API key. Use the saved agent's model in the platform; the app validates its report output before rendering. Use a local MongoDB instance or an Atlas connection string. For Atlas, allow your server IP and configure a database user. Do not use a `NEXT_PUBLIC_` prefix for credentials.
 
 ```sh
 npm run seed
@@ -33,14 +35,14 @@ npm run dev
 
 Restart the development server after changing environment variables. The seed command inserts missing sample holdings without overwriting existing records, and creates a unique `holdings.id` index. Use a separate database for this POC. The seed user needs write/index permissions; the application itself should use a different MongoDB user with only `read` permission on the POC database.
 
-The model must support function calling and structured outputs. If you change `OPENAI_MODEL`, choose a compatible model. API usage may incur charges. Never enter API keys in the chat UI.
+API usage may incur charges. Never enter API keys in the chat UI.
 
-| OpenAI key | MongoDB URI | Behaviour                                   |
-| ---------- | ----------- | ------------------------------------------- |
-| Missing    | Missing     | Sample data + deterministic templates       |
-| Set        | Missing     | Real LLM tool calls over sample data        |
-| Missing    | Set         | Database data + deterministic templates     |
-| Set        | Set         | Full frontend → LLM → MongoDB → report flow |
+| OpenAI key + agent ID | MongoDB URI | Behaviour                                   |
+| --------------------- | ----------- | ------------------------------------------- |
+| Missing               | Missing     | Sample data + deterministic templates       |
+| Valid                 | Missing     | Saved agent tool calls over sample data     |
+| Missing               | Set         | Database data + deterministic templates     |
+| Valid                 | Set         | Full frontend → saved agent → MongoDB → report flow |
 
 Configured service failures return an error; they never silently substitute demo data. The initial screen contains an explicitly labeled sample snapshot, replaced after the connection check if MongoDB is configured. The snapshot itself is template-generated; click Generate to call the LLM. An empty collection returns an empty report, not seeded data.
 
@@ -50,22 +52,22 @@ Configured service failures return an error; they never silently substitute demo
 sequenceDiagram
     participant UI as React / Next.js UI
     participant API as Next.js API
-    participant LLM as OpenAI
+    participant Agent as OpenAI saved agent
     participant DB as MongoDB
     UI->>API: POST /api/assistant {question, format}
-    API->>LLM: Question + read-only tool definition
-    LLM->>API: get_portfolio(assetClass, region)
+    API->>Agent: Start session with question and read-only tool
+    Agent->>API: get_portfolio(assetClass, region)
     API->>API: Zod validation + allowlisted query
     API->>DB: Read holdings with bounded filters
     DB-->>API: Portfolio snapshot
-    API-->>LLM: Holdings + calculated totals
-    LLM-->>API: Structured narrative + chart grouping
+    API-->>Agent: Holdings + calculated totals
+    Agent-->>API: Structured narrative + chart grouping
     API-->>UI: Report + source data + provenance
     UI->>UI: Render / export chart, text, PNG, HTML or PDF
 ```
 
 - `app/api/assistant/route.ts`: validates requests and invokes the reporting service.
-- `lib/assistant.ts`: server-side OpenAI tool loop and structured response parsing.
+- `lib/assistant.ts`: saved Agents API session, server-side portfolio tool handler and structured report validation.
 - `lib/portfolio.ts`: MongoDB connection reuse, allowlisted filters, document validation and totals.
 - `lib/contracts.ts`: shared request, tool and report contracts.
 - `components/workspace.tsx`: interactive charts, views, source status and session history.
@@ -94,7 +96,7 @@ npm run build
 npm audit --audit-level=moderate
 ```
 
-Tests cover aggregate totals, filter validation, empty selections, request validation, same-origin protection, HTML escaping, PDF signatures and a mocked OpenAI function-calling flow. Real OpenAI and MongoDB integration requires your credentials and is not exercised by the offline tests.
+Tests cover aggregate totals, filter validation, empty selections, request validation, same-origin protection, HTML escaping, PDF signatures and a mocked saved-agent tool-calling flow. Real OpenAI and MongoDB integration requires your credentials and is not exercised by the offline tests.
 
 ## Before Deployment
 

@@ -105,6 +105,35 @@ test("origin validation respects the incoming host and rejects foreign origins",
   assert.equal((await POST(request("http://localhost:3000"))).status, 403);
 });
 
+test("origin validation accepts the public HTTPS origin behind a proxy", async () => {
+  const request = new Request("http://localhost:3000/api/assistant", {
+    method: "POST",
+    headers: {
+      host: "localhost:3000",
+      origin: "https://folio-3000.app.github.dev",
+      "x-forwarded-host": "folio-3000.app.github.dev",
+      "x-forwarded-proto": "https",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ question: "x", format: "chart" }),
+  });
+  assert.equal((await POST(request)).status, 400);
+});
+
+test("origin validation accepts the request host when the forwarded host is internal", async () => {
+  const request = new Request("http://localhost:3000/api/assistant", {
+    method: "POST",
+    headers: {
+      host: "folio-3000.app.github.dev",
+      origin: "https://folio-3000.app.github.dev",
+      "x-forwarded-host": "localhost:3000",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ question: "x", format: "chart" }),
+  });
+  assert.equal((await POST(request)).status, 400);
+});
+
 test("HTML exports escape model text and PDF exports contain a real PDF document", async () => {
   const report = demoReport(
     "Portfolio",
@@ -121,12 +150,14 @@ test("HTML exports escape model text and PDF exports contain a real PDF document
   assert.equal((await pdf.text()).slice(0, 5), "%PDF-");
 });
 
-test("OpenAI tool calling retrieves validated data before producing a structured report", async () => {
+test("saved agent uses the portfolio tool before producing a structured report", async () => {
   const originalFetch = globalThis.fetch;
   const originalKey = process.env.OPENAI_API_KEY;
+  const originalAgentId = process.env.OPENAI_AGENT_ID;
   const originalUri = process.env.MONGODB_URI;
-  const requests: Record<string, unknown>[] = [];
+  const requests: { url: string; body: Record<string, unknown> }[] = [];
   process.env.OPENAI_API_KEY = "test-key-not-a-real-secret";
+  process.env.OPENAI_AGENT_ID = "agent_test";
   delete process.env.MONGODB_URI;
   const narrative = {
     title: "UK bonds",
@@ -135,53 +166,106 @@ test("OpenAI tool calling retrieves validated data before producing a structured
     grouping: "holding",
     chartType: "bar",
   };
-  globalThis.fetch = async (_input, init) => {
-    requests.push(JSON.parse(String(init?.body)));
-    const message =
-      requests.length === 1
-        ? {
-            role: "assistant",
-            content: null,
-            refusal: null,
-            tool_calls: [
-              {
-                id: "call_portfolio",
-                type: "function",
-                function: {
-                  name: "get_portfolio",
-                  arguments: JSON.stringify({
-                    assetClass: "Fixed income",
-                    region: "United Kingdom",
-                  }),
-                },
-              },
-            ],
-          }
-        : {
-            role: "assistant",
-            content:
-              requests.length === 2
-                ? "Data retrieved."
-                : JSON.stringify(narrative),
-            refusal: null,
-          };
-    return new Response(
-      JSON.stringify({
-        id: "test-completion",
-        object: "chat.completion",
-        created: 1,
-        model: "test",
-        choices: [
-          {
-            index: 0,
-            message,
-            finish_reason: requests.length === 1 ? "tool_calls" : "stop",
-            logprobs: null,
-          },
-        ],
-      }),
-      { headers: { "content-type": "application/json" } },
-    );
+  const turn = {
+    id: "turn_test",
+    agent_id: "agent_test",
+    completed_at: null,
+    created_at: 1,
+    error: null,
+    object: "agent.session.turn",
+    session_id: "session_test",
+    started_at: 1,
+    status: "in_progress",
+    subagent_id: null,
+    usage: null,
+  };
+  const session = (status: string) => ({
+    id: "session_test",
+    object: "agent.session",
+    status,
+    required_actions: [],
+  });
+  const functionCall = {
+    id: "call_item",
+    arguments: {
+      assetClass: "Fixed income",
+      region: "United Kingdom",
+    },
+    call_id: "call_portfolio",
+    name: "get_portfolio",
+    status: "in_progress",
+    turn_id: "turn_test",
+    type: "function_call",
+  };
+  const assistantMessage = {
+    id: "message_test",
+    content: [{ type: "output_text", text: JSON.stringify(narrative) }],
+    phase: "final_answer",
+    role: "assistant",
+    status: "completed",
+    turn_id: "turn_test",
+    type: "message",
+  };
+  const events = [
+    {
+      event_id: "event_created",
+      type: "agent.session.created",
+      session: session("in_progress"),
+    },
+    {
+      event_id: "event_turn_created",
+      session_id: "session_test",
+      turn_id: "turn_test",
+      turn,
+      type: "agent.session.turn.created",
+    },
+    {
+      event_id: "event_tool_call",
+      item: functionCall,
+      output_index: 0,
+      session_id: "session_test",
+      turn_id: "turn_test",
+      type: "agent.session.turn.item.added",
+    },
+    {
+      event_id: "event_message_done",
+      item: assistantMessage,
+      output_index: 1,
+      session_id: "session_test",
+      turn_id: "turn_test",
+      type: "agent.session.turn.item.done",
+    },
+    {
+      event_id: "event_turn_completed",
+      session_id: "session_test",
+      turn_id: "turn_test",
+      turn: { ...turn, completed_at: 2, status: "completed" },
+      type: "agent.session.turn.completed",
+      usage: null,
+    },
+    {
+      event_id: "event_idle",
+      session: session("idle"),
+      type: "agent.session.idle",
+    },
+  ];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push({ url, body });
+    if (
+      url.endsWith("/agents/sessions") &&
+      init?.method?.toUpperCase() === "POST"
+    )
+      return new Response(
+        events
+          .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+          .join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    if (url.endsWith("/agents/sessions/session_test/events"))
+      return new Response(null, { status: 202 });
+    throw new Error(`Unexpected OpenAI request: ${url}`);
   };
   try {
     const report = await createReport("Compare UK bonds", "pdf");
@@ -190,15 +274,27 @@ test("OpenAI tool calling retrieves validated data before producing a structured
     assert.equal(report.portfolio.total, 154140);
     assert.equal(report.portfolio.holdings.length, 1);
     assert.equal(report.title, "UK bonds");
-    assert.equal(requests.length, 3);
-    assert.ok(JSON.stringify(requests[1].messages).includes('"role":"tool"'));
-    assert.ok(
-      JSON.stringify(requests[2].response_format).includes("json_schema"),
+    const sessionRequest = requests.find(({ url }) =>
+      url.endsWith("/agents/sessions"),
     );
+    assert.equal(sessionRequest?.body.agent_id, "agent_test");
+    assert.equal(
+      (sessionRequest?.body.agent as { tools: { name: string }[] }).tools[0]
+        .name,
+      "get_portfolio",
+    );
+    const toolRequest = requests.find(({ url }) => url.endsWith("/events"));
+    const toolResult = (
+      toolRequest?.body.events as { output: string; success: boolean }[]
+    )[0];
+    assert.equal(toolResult.success, true);
+    assert.equal(JSON.parse(toolResult.output).total, 154140);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;
+    if (originalAgentId === undefined) delete process.env.OPENAI_AGENT_ID;
+    else process.env.OPENAI_AGENT_ID = originalAgentId;
     if (originalUri === undefined) delete process.env.MONGODB_URI;
     else process.env.MONGODB_URI = originalUri;
   }
